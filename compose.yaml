@@ -1,0 +1,6 @@
+services:
+  kontur:
+    build: .
+    init: true
+    ports:
+      - "127.0.0.1:${KONTUR_PORT:-4173}:4173"
