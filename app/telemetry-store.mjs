@@ -26,7 +26,10 @@ export class SensorHistory {
   constructor(assets,read=sensorReading) {
     this.assets=new Map(assets.map(asset=>[asset.id,asset]));
     this.read=read;
-    this.records=new Map(assets.map(asset=>[asset.id,new Map()]));
+    // Built-in readings are deterministic. Keep the observed interval and reconstruct
+    // its values on demand. External readers still need their actual samples saved.
+    this.records=read===sensorReading?null:new Map(assets.map(asset=>[asset.id,new Map()]));
+    this.first=null;
     this.last=null;
   }
 
@@ -34,7 +37,8 @@ export class SensorHistory {
     const minute=Math.floor(clock/sampleStep)*sampleStep;
     if(this.last!==null&&minute<=this.last) return false;
     const start=this.last===null?minute:Math.max(this.last+sampleStep,minute-day);
-    for(const [id,asset] of this.assets) {
+    this.first=Math.max(this.first??minute,minute-day);
+    if(this.records) for(const [id,asset] of this.assets) {
       const records=this.records.get(id);
       for(let time=start;time<=minute;time+=sampleStep) records.set(time,this.read(asset,time));
       for(const key of records.keys()) {
@@ -50,11 +54,11 @@ export class SensorHistory {
     const asset=this.assets.get(id);
     if(!asset) return [];
     const last=Math.floor(clock/sampleStep)*sampleStep;
-    const records=this.records.get(id);
+    const records=this.records?.get(id);
     const result=[];
     for(let time=last-window;time<=last;time+=sampleStep) {
-      const observed=records.has(time);
-      result.push({time,observed,...(observed?records.get(time):this.read(asset,time))});
+      const observed=records?records.has(time):this.first!==null&&time>=this.first&&time<=this.last&&time%sampleStep===0;
+      result.push({time,observed,...(records&&observed?records.get(time):this.read(asset,time))});
     }
     return result;
   }

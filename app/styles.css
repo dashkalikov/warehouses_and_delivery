@@ -230,6 +230,8 @@ td small,.table-object small { color: var(--muted); display: block; font-size: 1
 .asset-dialog { border: 1px solid #d6e4d9; color: var(--ink); border-radius: 17px; padding: 0; width: min(1070px,94vw); max-height: 92vh; overflow: auto; background: #f8faf6; box-shadow: 0 22px 120px #142e2478; }
 .asset-dialog.compact { width: min(450px,94vw); }
 .asset-dialog::backdrop { background: #162e2b70; backdrop-filter: blur(2px); }
+.economy-graphics .asset-dialog::backdrop { backdrop-filter:none; }
+.economy-graphics .warehouse-pin,.economy-graphics .truck-pin { filter:none; }
 .asset-head { position: sticky; top: 0; z-index: 1; display: flex; justify-content: space-between; align-items: center; gap: 10px; border-bottom: 1px solid var(--line); padding: 13px 15px; background: #fff; }
 .asset-head>div:last-child { display: flex; align-items: center; gap: 9px; }
 .asset-head h2 { font-size: 25px; letter-spacing: -.031em; }

@@ -40,7 +40,11 @@ export const icons = {
 };
 export const icon = (name, size=20) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] ?? ''}</svg>`;
 export const button = (action, glyph, label) => `<button type="button" class="icon-btn" data-action="${action}" aria-label="${label}" title="${label}">${icon(glyph,18)}</button>`;
-export const num = (value, digits=0) => new Intl.NumberFormat('ru-RU',{ maximumFractionDigits:digits }).format(value);
+const numberFormats=new Map();
+export function num(value,digits=0) {
+  if(!numberFormats.has(digits)) numberFormats.set(digits,new Intl.NumberFormat('ru-RU',{maximumFractionDigits:digits}));
+  return numberFormats.get(digits).format(value);
+}
 export const duration = (hours) => {
   const minutes = Math.round(hours * 60);
   return `${Math.floor(minutes / 60)} ч ${String(minutes % 60).padStart(2,'0')} мин`;

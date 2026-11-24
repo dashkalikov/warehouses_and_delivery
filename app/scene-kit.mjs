@@ -105,6 +105,18 @@ export class SceneParts {
     return this.object(new T.CylinderGeometry(r,r,height,segments),x,y,z,color,surface,angles);
   }
 
+  instances(geometry,centers,color,surface,angleX=0) {
+    const mesh=new T.InstancedMesh(geometry,this.material(color,surface),centers.length);
+    matrix.makeRotationX(angleX);
+    centers.forEach(([x,y,z],i)=>{
+      matrix.setPosition(x,y,z);
+      mesh.setMatrixAt(i,matrix);
+    });
+    mesh.castShadow=true;
+    mesh.receiveShadow=true;
+    this.group.add(mesh);
+  }
+
   // Bevels catch light on sheet-metal edges and break the silhouette of the box.
   profile(points,x,y,z,depth,color,surface='paint',bevel=.045,openings=[]) {
     const path = new T.Shape();

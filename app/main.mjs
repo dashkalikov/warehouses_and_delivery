@@ -1,9 +1,9 @@
 import { cities, roads, warehouses, zones, fleet, equipment, statusText } from './data.mjs';
-import { planRoutes, predictMaintenance, telemetry, tripPosition } from './domain.mjs';
+import { createRoutePlanner, predictMaintenance, telemetry, tripPosition } from './domain.mjs';
 import { LogisticsMap } from './map.mjs';
-import { ModelView } from './model.mjs';
 import { facilityLayout } from './spatial.mjs';
-import { hasCargoRoof, vehicleSpecifications } from './vehicle-scene.mjs';
+import { hasCargoRoof, vehicleSpecifications } from './vehicle-specs.mjs';
+import { chooseGraphics, graphicsOptions } from './graphics.mjs';
 import { icon, button, num, duration, status, spark, escapeText } from './ui.mjs';
 import { driverProfile, siteVehicles, tripHours, tripPhase, warehouseStaff } from './operations.mjs';
 import { mapObjectList, renderStaff, renderTripTimeline, renderYard, routeDiagram, tripTrace } from './dispatch-ui.mjs';
@@ -14,8 +14,10 @@ import { cargoPreview, filterInventory, inventoryPanel, inventoryRows, productSh
 import { palettes, resolveAppearance, themeNames } from './appearance.mjs';
 
 const $=selector=>document.querySelector(selector);
-const warehouse=id=>warehouses.find(w=>w.id===id);
-const vehicle=id=>fleet.find(v=>v.id===id);
+const warehousesById=new Map(warehouses.map(w=>[w.id,w]));
+const fleetById=new Map(fleet.map(v=>[v.id,v]));
+const warehouse=id=>warehousesById.get(id);
+const vehicle=id=>fleetById.get(id);
 const city=id=>cities[id][0];
 const attr=(name,id)=>`data-action="${name}" data-id="${id}"`;
 const action=(name,text,glyph,cls='secondary')=>`<button type="button" class="btn ${cls}" data-action="${name}">${glyph?icon(glyph,17):''}${text}</button>`;
@@ -24,6 +26,7 @@ const forecast=(v,t=state.clock)=>predictMaintenance(telemetry(v,t));
 const lab=(a,b)=>`<div class="detail-pair"><span>${a}</span><strong>${b}</strong></div>`;
 const routeName=route=>city(route.nodes[0])+' → '+city(route.nodes.at(-1));
 const graphOptions={allowActive:true,maxRoutes:1};
+const planRoute=createRoutePlanner(roads);
 const pages={
   overview:['Пульт управления','overview'],
   warehouses:['Склады','warehouse'],
@@ -51,8 +54,14 @@ function saveSetting(key,value) {
 }
 const savedTheme=readSetting('theme','light');
 const savedPalette=readSetting('palette','kontur');
+const savedGraphics=readSetting('graphics','auto');
 const preferences={theme:Object.hasOwn(themeNames,savedTheme)?savedTheme:'light',
-  palette:Object.hasOwn(palettes,savedPalette)?savedPalette:'kontur',streets:readSetting('streets','off')==='on'};
+  palette:Object.hasOwn(palettes,savedPalette)?savedPalette:'kontur',streets:readSetting('streets','off')==='on',
+  graphics:Object.hasOwn(graphicsOptions,savedGraphics)?savedGraphics:'auto'};
+function graphicsProfile() { return chooseGraphics(preferences.graphics,navigator); }
+function applyGraphics() {
+  document.documentElement.classList.toggle('economy-graphics',!graphicsProfile().antialias);
+}
 const networkLayers=[['warehouses','Склады','pin'],['vehicles','Машины','truck'],['routes','Маршруты','line'],['districts','Районы доставки','district'],['coverage','Покрытие складов','cover']];
 const mapLayers=[...networkLayers,['regions','Границы регионов'],['cities','Населённые пункты'],['roads','Дороги'],['hubs','Аэропорты и ж/д']];
 const layerSetting=id=>id==='coverage'?'coverage':'layer.'+id;
@@ -74,6 +83,7 @@ function applyTheme() {
 }
 systemTheme.addEventListener('change',applyTheme);
 applyTheme();
+applyGraphics();
 const state={
   page: 'overview', clock: 0, warehouseClock:0, playing:true, speed:1, selected:'msk',
   zone:'D', dialog:null, vehicleFilter:'all', serviceFilter:'all',
@@ -84,7 +94,7 @@ const state={
   plans:[], planIndex:0, planError:'', planned:null, scheduled:new Map(),
 };
 state.trips=fleet.filter(v=>v.destination).flatMap(v=>{
-  const route=planRoutes(roads,v.home,v.destination,v,v.load,'fast',graphOptions)[0];
+  const route=planRoute(v.home,v.destination,v,v.load,'fast',graphOptions)[0];
   if(!route) return [];
   const elapsed=v.progress<0?v.progress:v.progress>1?route.hours+.08:route.hours*v.progress;
   return [{ vehicle:v, route, at:0, elapsed, load:v.load, pallets:v.pallets, goods:v.goods }];
@@ -92,7 +102,7 @@ state.trips=fleet.filter(v=>v.destination).flatMap(v=>{
 const tripsByVehicle=new Map(state.trips.map(trip=>[trip.vehicle.id,trip]));
 const telemetryAssets={vehicle:fleet,equipment,warehouse:warehouses};
 const history=new SensorHistory(Object.values(telemetryAssets).flat());
-let map, model, mapCard, toastTimer;
+let map, model, modelModule, mapCard, toastTimer;
 let clockUpdated=performance.now();
 function advanceTime() {
   const now=performance.now();
@@ -109,9 +119,18 @@ const tripFor=id=>tripsByVehicle.get(id);
 const movement=t=>tripPosition(t.route,elapsed(t));
 const vehicleState=v=>tripFor(v.id)?tripPhase(tripFor(v.id),state.clock):v.status;
 const vehicleBadge=key=>key==='loading'?status('watch','Загрузка'):key==='unloading'?status('watch','Разгрузка'):badge(key);
-const alertList=()=>[...fleet,...equipment].map(asset=>({asset,risk:forecast(asset).risk})).filter(row=>row.risk>=45)
-  .sort((a,b)=>b.risk-a.risk).map(row=>row.asset);
-const clockLabel=()=>new Intl.DateTimeFormat('ru-RU',{hour:'2-digit',minute:'2-digit',second:'2-digit',timeZone:'UTC'}).format(new Date(Date.UTC(2026,10,23,9,42)+state.clock*1000));
+const maintainedAssets=[...fleet,...equipment];
+function alertList() {
+  const alerts=[];
+  for(const asset of maintainedAssets) {
+    const {risk}=forecast(asset);
+    if(risk>=45) alerts.push({asset,risk});
+  }
+  return alerts.sort((a,b)=>b.risk-a.risk).map(row=>row.asset);
+}
+const clockFormat=new Intl.DateTimeFormat('ru-RU',{hour:'2-digit',minute:'2-digit',second:'2-digit',timeZone:'UTC'});
+const clockStart=Date.UTC(2026,10,23,9,42);
+const clockLabel=()=>clockFormat.format(clockStart+state.clock*1000);
 
 $('#sidebar').innerHTML=`<button type="button" class="brand" data-page="overview" aria-label="WD — пульт управления"><img src="./assets/mark.svg" alt="" width="48" height="48"/><span><b>WD</b><small>Warehouses &amp; Delivery</small></span></button>
   <div class="side-label">РАБОЧАЯ ОБЛАСТЬ</div>
@@ -282,6 +301,9 @@ function settings() {
     <section class="panel settings-panel"><div class="panel-head"><div><h2>Карта</h2><p>Геометрия, дороги и транспортные узлы доступны локально.</p></div><span class="metric-icon teal">${icon('layers',21)}</span></div>
       <label class="setting-switch"><span><b>Улицы OpenStreetMap</b><small>Подгружать подробную подложку при приближении. Для этого слоя нужен интернет.</small></span><input id="street-tiles" type="checkbox" role="switch" ${preferences.streets?'checked':''}></label>
     </section>
+    <section class="panel settings-panel"><div class="panel-head"><div><h2>Производительность</h2><p>Режим влияет на разрешение 3D, тени и частоту отрисовки.</p></div><span class="metric-icon blue">${icon('cube',21)}</span></div>
+      <label class="setting-switch"><span><b>Качество 3D-графики</b><small>«Экономия» подходит для слабых ноутбуков.</small></span><select id="graphics-mode" aria-label="Качество 3D-графики">${selectOptions(Object.entries(graphicsOptions),preferences.graphics)}</select></label>
+    </section>
   </div>`;
 }
 
@@ -357,7 +379,7 @@ function calculate(form) {
     :d.cold&&!v.refrigerated?'Для этого груза нужен рефрижератор.'
     :!d.goods?'Укажите наименование груза.':'';
   state.planIndex=0;
-  state.plans=state.planError?[]:planRoutes(roads,d.from,d.to,v,d.load,d.criterion,{
+  state.plans=state.planError?[]:planRoute(d.from,d.to,v,d.load,d.criterion,{
     traffic:d.traffic?4:1,closed:d.blocked?['ufa:ekb']:[],cold:d.cold,
   });
   if(!state.plans.length&&!state.planError) state.planError='Нет подходящего пути по учебному дорожному графу.';
@@ -506,11 +528,34 @@ function openAsset(kind,id) {
   dialog.classList.toggle('compact',kind==='equipment');
   dialog.innerHTML=assetBody(kind,asset);
   if(!dialog.open) dialog.showModal();
-  if(kind!=='equipment') {
+  map.setSuspended(true);
+  const opened=state.dialog;
+  if(kind!=='equipment') queueMicrotask(()=>{
+    if(state.dialog===opened&&opened.tab==='model') ensureModel();
+  });
+  refreshDialog();
+}
+
+function ensureModel() {
+  const opening=state.dialog;
+  if(!opening||opening.kind==='equipment'||model) return Promise.resolve(model);
+  if(opening.modelReady) return opening.modelReady;
+  const dialog=$('#asset-dialog');
+  const canvas=$('#asset-model');
+  const controls=dialog.querySelectorAll('[data-3d-only] button, button[data-3d-only]');
+  controls.forEach(el=>el.disabled=true);
+  canvas.setAttribute('aria-busy','true');
+  set('scene-hint','Загружается 3D-модель…');
+  modelModule??=import('./model.mjs').catch(error=>{modelModule=null;throw error;});
+  opening.modelReady=modelModule.then(({ModelView})=>{
+    if(state.dialog!==opening||!dialog.open) return;
+    const {kind,asset}=opening;
     const trip=kind==='vehicle'?tripFor(asset.id):null;
-    const sceneAsset=kind==='warehouse'?{...asset,activities:siteVehicles(id,fleet,state.trips,state.clock).filter(row=>row.onSite)}:
+    const sceneAsset=kind==='warehouse'?{...asset,activities:siteVehicles(asset.id,fleet,state.trips,state.clock).filter(row=>row.onSite)}:
       trip?{...asset,pallets:trip.pallets}:asset;
-    const canvas=$('#asset-model');
+    controls.forEach(el=>el.disabled=false);
+    canvas.removeAttribute('aria-busy');
+    set('scene-hint','Перетащите для вращения · колесо мыши для масштаба');
     model=new ModelView(canvas,kind,sceneAsset,state.zone,kind==='warehouse'?state.warehouseClock:state.clock,{
       selectZone:id=>actions['select-zone'](id),
       cameraMode:on=>{
@@ -523,15 +568,22 @@ function openAsset(kind,id) {
         if(kind==='warehouse') dialog.querySelector('.scene-zoom').hidden=false;
         set('scene-hint',kind==='warehouse'?'План склада · WebGL недоступен':'Для вращаемой модели нужен браузер с WebGL 2');
       },
-    });
-    if(model.renderer) canvas.focus({preventScroll:true});
-  }
-  refreshDialog();
+    },graphicsProfile());
+    if(model.renderer&&opening.tab==='model') canvas.focus({preventScroll:true});
+    refreshDialog();
+    return model;
+  }).catch(error=>{
+    if(state.dialog!==opening) return;
+    canvas.removeAttribute('aria-busy');
+    set('scene-hint','Не удалось загрузить 3D-модель. Откройте карточку ещё раз.');
+    console.error(error);
+  });
+  return opening.modelReady;
 }
 
 function set(id,text) {
   const el=document.getElementById(id);
-  if(el) el.textContent=text;
+  if(el&&el.textContent!==String(text)) el.textContent=text;
 }
 function setHtml(selector,html) {
   const el=$(selector);
@@ -565,8 +617,10 @@ function refreshVehicleCargo() {
 
 function refreshInventory() {
   if(state.dialog?.tab!=='inventory') return;
-  const {inventory,warehouse,rows,phase}=inventoryContext();
+  const {kind,asset,inventory}=state.dialog;
+  const phase=kind==='warehouse'?'warehouse':vehicleState(asset);
   if(inventory.phase===phase) return;
+  const {warehouse,rows}=inventoryContext();
   inventory.phase=phase;
   $('#asset-inventory-pane').innerHTML=inventoryPanel(rows,{warehouse,phase});
   if(!rows.length) return;
@@ -737,25 +791,35 @@ function refresh() {
   const alerts=alertList();
   set('nav-count',alerts.length);
   $('#bell-dot').hidden=!alerts.length;
-  const active=state.trips.filter(t=>tripPhase(t,state.clock)==='active');
-  set('kpi-trips',active.length);
-  set('kpi-load',num(active.reduce((s,t)=>s+t.load,0),1));
+  if(state.page==='overview') {
+    let inTransit=0, cargo=0;
+    for(const trip of state.trips) if(tripPhase(trip,state.clock)==='active') {
+      inTransit++;
+      cargo+=trip.load;
+    }
+    set('kpi-trips',inTransit);
+    set('kpi-load',num(cargo,1));
+  }
   set('kpi-alerts',alerts.length);
   const playback=$('#pause');
   if(playback) {
     playback.setAttribute('aria-label',state.playing?'Пауза симуляции':'Продолжить симуляцию');
     setHtml('#pause',icon(state.playing?'pause':'play',17)+(state.playing?'Пауза':'Продолжить'));
   }
-  setHtml('#event-list',eventMarkup(alerts));
+  if(state.page==='overview') setHtml('#event-list',eventMarkup(alerts));
   if(!$('#notifications').hidden) setHtml('#notifications','<h3>Оповещения</h3>'+eventMarkup(alerts,12));
-  document.querySelectorAll('[data-clock]').forEach(el=>el.textContent=clockLabel());
+  const clockText=clockLabel();
+  document.querySelectorAll('[data-clock]').forEach(el=>{if(el.textContent!==clockText) el.textContent=clockText;});
   document.querySelectorAll('.map-live').forEach(el=>el.classList.toggle('paused',!state.playing));
   for(const entry of document.querySelectorAll('[data-fill]')) {
     const w=warehouse(entry.dataset.fill);
     const fill=Math.round(sensorReading(w,state.clock).fill);
-    entry.textContent=fill+'%';
-    const bar=$(`[data-fill-bar="${w.id}"]`);
-    if(bar) bar.style.width=fill+'%';
+    const text=fill+'%';
+    if(entry.textContent!==text) {
+      entry.textContent=text;
+      const bar=$(`[data-fill-bar="${w.id}"]`);
+      if(bar) bar.style.width=text;
+    }
   }
   for(const entry of document.querySelectorAll('[id^="trip-status-"]')) {
     const t=tripFor(entry.id.slice(12));
@@ -813,11 +877,13 @@ function search(value) {
   list.innerHTML=matches.length?matches.slice(0,8).map(v=>`<button ${attr(v.kind,v.id)} class="search-result">${icon(v.kind==='warehouse'?'warehouse':'truck',18)}<span><b>${v.name}</b><small>${v.meta}</small></span></button>`).join(''):'<p>Совпадений нет.</p>';
 }
 
-$('#asset-dialog').addEventListener('close',()=>{
-  $('#asset-dialog').classList.remove('scene-expanded');
+$('#asset-dialog').addEventListener('close',event=>{
+  if(event.currentTarget.open) return;
+  event.currentTarget.classList.remove('scene-expanded');
   model?.dispose();
   model=null;
   state.dialog=null;
+  map.setSuspended(document.hidden);
 });
 $('#asset-dialog').addEventListener('cancel',event=>{
   const dialog=event.currentTarget;
@@ -828,6 +894,10 @@ $('#asset-dialog').addEventListener('cancel',event=>{
   }
 });
 document.addEventListener('fullscreenchange',updateSceneFullButton);
+document.addEventListener('visibilitychange',()=>{
+  map.setSuspended(document.hidden||$('#asset-dialog').open);
+  if(!document.hidden) refresh();
+});
 document.addEventListener('submit',e=>{
   if(e.target.id==='planner-form') { e.preventDefault(); calculate(e.target); }
 });
@@ -875,6 +945,11 @@ document.addEventListener('change',e=>{
     saveSetting('streets',preferences.streets?'on':'off');
     map.setOnline(preferences.streets);
   }
+  if(target.id==='graphics-mode'&&Object.hasOwn(graphicsOptions,target.value)) {
+    preferences.graphics=target.value;
+    saveSetting('graphics',target.value);
+    applyGraphics();
+  }
   if(e.target.name==='from'&&e.target.form?.id==='planner-form') {
     e.target.form.elements.vehicle.innerHTML=reserveOptions(e.target.value,'');
   }
@@ -917,6 +992,11 @@ function setMapLayer(id,on) {
 }
 
 function setShell(name,hidden) {
+  if(!model) {
+    const dialog=state.dialog;
+    dialog?.modelReady?.then(ready=>{if(ready&&state.dialog===dialog) setShell(name,hidden);});
+    return;
+  }
   if(!model?.shells?.[name]) return;
   state.dialog.shell[name]=hidden;
   model.setShell(name,hidden);
@@ -946,6 +1026,7 @@ function warehouseTab(id) {
   if(id==='yard') refreshYard(true);
   if(id==='staff') setHtml('#warehouse-staff',renderStaff(state.dialog.asset,state.dialog.staffFilter));
   if(id==='inventory') refreshInventory();
+  if(id==='model') return ensureModel();
 }
 
 function updateSceneFullButton() {
@@ -1066,10 +1147,12 @@ const actions={
     setShell('walls',true);
     model?.focusZone();
   },
-  'show-person':id=>{
-    const person=warehouseStaff(state.dialog.asset).find(member=>member.id===id);
+  'show-person':async id=>{
+    const dialog=state.dialog;
+    const person=warehouseStaff(dialog.asset).find(member=>member.id===id);
     if(!person) return;
-    warehouseTab('model');
+    await warehouseTab('model');
+    if(state.dialog!==dialog||dialog.tab!=='model') return;
     actions['select-zone'](person.zone);
     setShell('walls',true);
     model?.focusPerson(id);
@@ -1120,7 +1203,7 @@ const actions={
       el.classList.toggle('selected',selected);
       el.setAttribute('aria-pressed',String(selected));
     });
-    if(id==='model') $('#asset-model').focus({preventScroll:true});
+    if(id==='model') {ensureModel();$('#asset-model').focus({preventScroll:true});}
   },
   'inventory-group':id=>{
     state.dialog.inventory.group=id;
@@ -1136,8 +1219,10 @@ const actions={
     openProduct(sku);
   },
   'inventory-back':closeProduct,
-  'inventory-zone':id=>{
-    warehouseTab('model');
+  'inventory-zone':async id=>{
+    const dialog=state.dialog;
+    await warehouseTab('model');
+    if(state.dialog!==dialog||dialog.tab!=='model') return;
     actions['select-zone'](id);
     actions['zoom-zone']();
   },
@@ -1196,4 +1281,4 @@ document.addEventListener('click',e=>{
 
 makeMap();
 renderPage();
-setInterval(refresh,420);
+setInterval(()=>{if(state.playing&&!document.hidden) refresh();},420);

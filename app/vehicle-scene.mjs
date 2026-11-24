@@ -2,15 +2,7 @@ import * as T from './vendor/three.mjs';
 import { SceneParts } from './scene-kit.mjs';
 import { seatedDriver, segment } from './people-scene.mjs';
 
-export const hasCargoRoof=kind=>kind!=='flat';
-
-export const vehicleSpecifications = {
-  semi: { length:16.45,width:2.55,height:3.95, cab:2.45, radius:.51, axles:[1.18,3.65,11.82,13.04,14.26], paint:'#267b95', label:'Тягач и полуприцеп' },
-  box:  { length:7.42,width:2.4,height:3.32, cab:2.08, radius:.46, axles:[1.16,5.50], paint:'#d08638', label:'Среднетоннажный фургон' },
-  cold: { length:8.72,width:2.55,height:3.74, cab:2.46, radius:.50, axles:[1.28,6.39], paint:'#467bb1', label:'Изотермический кузов' },
-  van:  { length:5.69,width:2.08,height:2.56, cab:2.18, radius:.36, axles:[.98,4.14], paint:'#ad514d', label:'Цельнометаллический фургон' },
-  flat: { length:8.51,width:2.55,height:3.10, cab:3.03, radius:.58, axles:[1.31,5.92,7.14], paint:'#63865b', label:'Бортовая платформа' },
-};
+import { vehicleSpecifications } from './vehicle-specs.mjs';
 const black='#23303c', charcoal='#293846', steel='#697a89', alloy='#b1bdc3', glass='#264866';
 
 function windowPane(s,points,color=glass,surface='glass') {
@@ -49,10 +41,8 @@ function headlamp(s,w,bottom,kind,side) {
   segment(s,[optic,y+.018,z-.030*side],[optic,y+.107,z-.025*side],.007,'#d9a34e','light');
 }
 
-function wheel(s,x,y,z,r,w,outer) {
-  const ring=[[-.48,.64],[-.48,.78],[-.40,.94],[-.28,.994],[.28,.994],[.40,.94],[.48,.78],[.48,.64]];
-  const tire=new T.LatheGeometry(ring.map(([side,height])=>new T.Vector2(height*r,side*w)),40);
-  s.object(tire,x,y,z,'#252932','rubber',[Math.PI/2]);
+function wheel(s,x,y,z,r,w,outer,repeated) {
+  repeated.tires.push([x,y,z]);
   s.cylinder(x,y,z,r*.69,w*.88,'#75818d','steel');
   const face=z+outer*w*.47;
   s.cylinder(x,y,face,r*.58,.022,alloy,'steel');
@@ -61,11 +51,11 @@ function wheel(s,x,y,z,r,w,outer) {
   s.cylinder(x,y,face+outer*.052,r*.15,.028,alloy,'aluminum');
   for(let n=0;n<10;n++) {
     const a=n*Math.PI/5;
-    s.cylinder(x+r*.219*Math.cos(a),y+r*.219*Math.sin(a),face+outer*.056,r*.026,.038,'#a7b0b3','steel','z',6);
+    repeated.bolts.push([x+r*.219*Math.cos(a),y+r*.219*Math.sin(a),face+outer*.056]);
   }
   for(let i=0;i<8;i++) {
     const angle=i*Math.PI/4;
-    s.cylinder(x+Math.cos(angle)*r*.396,y+Math.sin(angle)*r*.396,face+outer*.020,r*.047,.019,'#415364','steel','z',6);
+    repeated.vents.push([x+Math.cos(angle)*r*.396,y+Math.sin(angle)*r*.396,face+outer*.020]);
   }
   for(let i=0;i<28;i++) {
     for(const band of [-1,1]) {
@@ -88,11 +78,12 @@ function vehicleFrame(s,d,kind) {
     s.box(.39,.57,z-.06,.78,.114,.14,'#526067','steel');
   }
   const width=r*.66;
+  const repeated={tires:[],bolts:[],vents:[]};
   for (const [index,x] of axles.entries()) {
     s.cylinder(x,r,.50,r*.18,w-1.0,steel,'steel');
     for (const side of [-1,1]) {
       const z=side===-1?width*.49:w-width*.49;
-      wheel(s,x,r,z,r,width,side);
+      wheel(s,x,r,z,r,width,side,repeated);
       if((kind==='semi'||kind==='flat')&&index>0) {
         s.cylinder(x,r,z-side*width*.77,r*.93,width*.55,'#272c35','rubber');
       }
@@ -107,6 +98,11 @@ function vehicleFrame(s,d,kind) {
       s.box(x-.24,r+.152,side<0?.43:w-.64,.48,.073,.21,'#46525a','steel');
     }
   }
+  const ring=[[-.48,.64],[-.48,.78],[-.40,.94],[-.28,.994],[.28,.994],[.40,.94],[.48,.78],[.48,.64]];
+  const tire=new T.LatheGeometry(ring.map(([side,height])=>new T.Vector2(height*r,side*width)),40);
+  s.instances(tire,repeated.tires,'#252932','rubber',Math.PI/2);
+  s.instances(new T.CylinderGeometry(r*.026,r*.026,.038,6),repeated.bolts,'#a7b0b3','steel',Math.PI/2);
+  s.instances(new T.CylinderGeometry(r*.047,r*.047,.019,6),repeated.vents,'#415364','steel',Math.PI/2);
   if(kind!=='van') {
     const fuelAt=d.cab+.32;
     for(const z of [.34,w-.34]) {

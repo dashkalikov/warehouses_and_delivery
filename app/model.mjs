@@ -4,12 +4,13 @@ import { makeWarehouse } from './warehouse-scene.mjs';
 import { makeVehicle } from './vehicle-scene.mjs';
 import { facilityLayout, shellPose } from './spatial.mjs';
 import { approach, bindCameraKeys, cameraBasis, navigationAxes, planFrameHalf, shortArc, travelVector } from './camera-motion.mjs';
+import { graphicsProfiles } from './graphics.mjs';
 
 const clamp=(value,min,max)=>Math.max(min,Math.min(max,value));
 const PI=Math.PI;
 
 export class ModelView {
-  constructor(canvas, mode, asset, zone, clock, actions={}) {
+  constructor(canvas, mode, asset, zone, clock, actions={}, graphics=graphicsProfiles.balanced) {
     this.canvas=canvas;
     this.mode=mode;
     this.asset=asset;
@@ -18,20 +19,30 @@ export class ModelView {
     this.clockAt=performance.now();
     this.rate=0;
     this.actions=actions;
+    this.graphics=graphics;
     this.abort=new AbortController();
     this.reducedMotion=matchMedia('(prefers-reduced-motion: reduce)');
     this.pose=this.homeView();
     this.target={...this.pose};
-    const context=canvas.getContext('webgl2',{antialias:true,alpha:true});
+    const context=canvas.getContext('webgl2',{antialias:graphics.antialias,alpha:true});
     if (context) this.createScene(context);
     else {
       this.flat=canvas.getContext('2d');
       this.actions.fallback?.();
     }
-    this.resize=new ResizeObserver(()=>{this.draw();this.wake();});
+    this.resize=new ResizeObserver(()=>this.measure());
     this.resize.observe(canvas);
     this.bind();
+    this.measure();
+  }
+
+  measure() {
+    const {clientWidth,clientHeight}=this.canvas;
+    if(this.viewWidth===clientWidth&&this.viewHeight===clientHeight) return;
+    this.viewWidth=clientWidth;
+    this.viewHeight=clientHeight;
     this.draw();
+    this.wake();
   }
 
   homeView() {
@@ -39,8 +50,9 @@ export class ModelView {
   }
 
   createScene(context) {
-    const renderer=new T.WebGLRenderer({canvas:this.canvas,context,antialias:true,alpha:true});
-    renderer.setPixelRatio(Math.min(devicePixelRatio||1,1.75));
+    const {antialias,pixelScale,maxPixelRatio,shadowSize}=this.graphics;
+    const renderer=new T.WebGLRenderer({canvas:this.canvas,context,antialias,alpha:true});
+    renderer.setPixelRatio(Math.min((devicePixelRatio||1)*pixelScale,maxPixelRatio));
     renderer.shadowMap.enabled=true;
     renderer.shadowMap.type=T.PCFShadowMap;
     renderer.shadowMap.autoUpdate=false;
@@ -79,7 +91,7 @@ export class ModelView {
     light.castShadow=true;
     const extent=size*1.3;
     Object.assign(light.shadow.camera,{left:-extent,right:extent,top:extent,bottom:-extent,near:.1,far:size*5});
-    light.shadow.mapSize.set(2048,2048);
+    light.shadow.mapSize.set(shadowSize,shadowSize);
     light.shadow.bias=-.00025;
     light.shadow.normalBias=this.mode==='warehouse' ? .012 : .035;
     this.scene.add(light,light.target);
@@ -204,6 +216,7 @@ export class ModelView {
   }
 
   setClock(clock,rate) {
+    if(!rate&&!this.rate&&this.clock===clock) return;
     this.clock=clock;
     this.rate=rate;
     this.clockAt=performance.now();
@@ -286,20 +299,38 @@ export class ModelView {
   }
 
   wake() {
-    if(this.frame || !this.canvas.clientWidth || !this.canvas.clientHeight) return;
+    if(this.frame || !this.viewWidth || !this.viewHeight) return;
     this.frame=requestAnimationFrame(now=>this.tick(now));
   }
 
   tick(now) {
     this.frame=0;
-    if(!this.canvas.isConnected || !this.canvas.clientWidth) { this.lastFrame=0; return; }
-    const delta=this.lastFrame?clamp((now-this.lastFrame)/1000,.001,.05):1/60;
-    this.lastFrame=now;
-    const active=this.keys?.active()??new Set();
-    if(active.size) this.nudge(navigationAxes(active),delta,false);
+    if(!this.canvas.isConnected||!this.viewWidth||!this.viewHeight) {
+      this.lastFrame=this.nextDraw=0;
+      return;
+    }
+    const active=this.keys?.active();
     const animate=Boolean(this.contents?.animate);
     const running=animate&&this.rate>0&&!this.reducedMotion.matches;
-    if(animate) this.contents.animate(this.clock+(running?(now-this.clockAt)*this.rate/1000:0));
+    const interacting=active?.size||Object.keys(this.pose).some(key=>this.pose[key]!==this.target[key])&&!this.followedPerson
+      ||this.doorMotion?.value!==this.doorMotion?.target
+      ||Object.values(this.shells??{}).some(shell=>shell.value!==shell.target);
+    const fps=running&&!interacting?this.graphics.animationFps:this.graphics.interactionFps;
+    const interval=1000/fps;
+    if(this.frameRate===fps&&now+1<(this.nextDraw??0)) { this.wake(); return; }
+    this.nextDraw=this.frameRate===fps&&this.nextDraw?Math.max(now,this.nextDraw+interval):now+interval;
+    this.frameRate=fps;
+    const delta=this.lastFrame?clamp((now-this.lastFrame)/1000,.001,.05):1/60;
+    this.lastFrame=now;
+    if(active?.size) this.nudge(navigationAxes(active),delta,false);
+    const time=this.clock+(running?(now-this.clockAt)*this.rate/1000:0);
+    const peopleVisible=this.contents?.people?.visible;
+    const animateNow=animate&&(time!==this.poseTime||peopleVisible!==this.peopleVisible);
+    if(animateNow) {
+      this.contents.animate(time);
+      this.poseTime=time;
+      this.peopleVisible=peopleVisible;
+    }
     this.trackPerson();
     const response=this.reducedMotion.matches?Infinity:17;
     let moving=false;
@@ -310,15 +341,15 @@ export class ModelView {
     }
     const shellMoving=this.updateShells(now);
     const doorsMoving=this.updateDoors(now);
-    if(animate) {
-      if(!this.lastShadow || now-this.lastShadow>72 || !running) {
+    if(animateNow) {
+      if(!this.lastShadow||now-this.lastShadow>this.graphics.shadowInterval||!running) {
         this.renderer.shadowMap.needsUpdate=true;
         this.lastShadow=now;
       }
     }
     this.draw();
-    if(active.size || moving || shellMoving || doorsMoving || running) this.wake();
-    else this.lastFrame=0;
+    if(active?.size || moving || shellMoving || doorsMoving || running) this.wake();
+    else this.lastFrame=this.nextDraw=0;
   }
 
   bind() {
@@ -359,7 +390,7 @@ export class ModelView {
       this.magnify(Math.exp(-e.deltaY*.001));
     },{passive:false});
     this.keys=bindCameraKeys(this.canvas.closest('.scene-panel'),{
-      signal:this.abort.signal,enabled:()=>Boolean(this.renderer&&this.canvas.clientWidth),
+      signal:this.abort.signal,enabled:()=>Boolean(this.renderer&&this.viewWidth),
       tap:axes=>this.nudge(axes,.12,true),wake:()=>this.wake(),
     });
     on('keydown',e=>{
@@ -397,7 +428,7 @@ export class ModelView {
   }
 
   draw() {
-    const {clientWidth:w,clientHeight:h}=this.canvas;
+    const w=this.viewWidth,h=this.viewHeight;
     if(!w||!h) return;
     if(!this.renderer) { this.drawPlan(w,h); return; }
     if(w!==this.width||h!==this.height) {
